@@ -8,16 +8,17 @@ Usage:
 
 Examples:
   hskue -- ./train.sh
-  hskue --history-dir ./hs_submitted_history -- ./train.sh
+  hskue --history-dir ~/.local/state/hskue/history -- ./train.sh
   hskue -t model:vit -t gpu:a100 -- ./train.sh --epochs 50
-  HS_SUBMITTED_HISTORY_DIR=./hs_submitted_history hskue -- ./train.sh
+  HS_SUBMITTED_HISTORY_DIR=~/.local/state/hskue/history hskue -- ./train.sh
 
 Notes:
   - Wrapper args:
       --history-dir DIR  Override the snapshot directory.
       --hs-bin PATH      Override the hypershell binary (default: hs).
   - Arguments before `--` are passed to `hs submit`.
-  - The job script is copied into the history directory before submission.
+  - The job script is copied into the per-user history directory before submission.
+  - The history directory keeps the newest 100 snapshots by default.
   - The queued command runs from the submit-time working directory.
 EOF
 }
@@ -54,8 +55,41 @@ script_interpreter() {
   fi
 }
 
+default_history_root() {
+  if [[ -n ${HOME:-} ]]; then
+    printf '%s\n' "$HOME/.local/state/hskue/history"
+    return
+  fi
+
+  printf '%s\n' "$(pwd -P)/hs_submitted_history"
+}
+
+prune_history_root() {
+  local history_root=$1
+  local history_limit=$2
+  local -a snapshots_to_prune=()
+  local snapshot_count=0
+
+  while IFS= read -r -d '' snapshot_dir; do
+    ((snapshot_count += 1))
+    if ((snapshot_count > history_limit)); then
+      snapshots_to_prune+=("$snapshot_dir")
+    fi
+  done < <(find "$history_root" -mindepth 1 -maxdepth 1 -type d -printf '%P\0' | sort -z -r)
+
+  if ((${#snapshots_to_prune[@]} == 0)); then
+    return
+  fi
+
+  local snapshot_dir
+  for snapshot_dir in "${snapshots_to_prune[@]}"; do
+    rm -rf -- "$history_root/$snapshot_dir"
+  done
+}
+
 history_root_override=
 hs_bin_override=
+history_limit=100
 hs_submit_args=()
 while (($#)); do
   case "$1" in
@@ -100,7 +134,7 @@ job_script_abs=$(resolve_path "$job_script_input")
 [[ -f "$job_script_abs" ]] || die "Job script does not exist: $job_script_input"
 
 submit_cwd=$(pwd -P)
-history_root=${history_root_override:-${HS_SUBMITTED_HISTORY_DIR:-"$submit_cwd/hs_submitted_history"}}
+history_root=${history_root_override:-${HS_SUBMITTED_HISTORY_DIR:-$(default_history_root)}}
 mkdir -p "$history_root"
 history_root=$(resolve_path "$history_root")
 
@@ -140,6 +174,8 @@ sha256=$hash
 hs_submit_args=${hs_submit_args[*]}
 job_args=${job_args[*]}
 EOF
+
+prune_history_root "$history_root" "$history_limit"
 
 printf 'Snapshot saved: %s\n' "$snapshot_script" >&2
 printf 'Launcher saved: %s\n' "$launcher_script" >&2

@@ -51,9 +51,9 @@ Examples:
 
 ```bash
 hskue -- ./train.sh
-hskue --history-dir ./hs_submitted_history -- ./train.sh
+hskue --history-dir ~/.local/state/hskue/history -- ./train.sh
 hskue -t model:vit -t gpu:a100 -- ./train.sh --epochs 50
-HS_SUBMITTED_HISTORY_DIR=./hs_submitted_history hskue -- ./train.sh
+HS_SUBMITTED_HISTORY_DIR=~/.local/state/hskue/history hskue -- ./train.sh
 ```
 
 ## Wrapper Arguments
@@ -71,10 +71,10 @@ Everything after `--` is treated as:
 
 ## History Directory
 
-By default, snapshots are stored in:
+By default, snapshots are stored in a fixed per-user directory:
 
 ```text
-./hs_submitted_history
+~/.local/state/hskue/history
 ```
 
 You can override that with:
@@ -85,7 +85,7 @@ You can override that with:
 Each submission creates a folder like:
 
 ```text
-hs_submitted_history/20260319T153000_train_ab12cd34ef56/
+~/.local/state/hskue/history/20260319T153000_train_ab12cd34ef56/
 ```
 
 That folder contains:
@@ -93,6 +93,7 @@ That folder contains:
 - the copied job script
 - `launch.sh`, which runs the snapshot from the original working directory
 - `metadata.txt`, which records submission details
+- old snapshot folders are pruned automatically so only the newest 100 remain
 
 ## Notes
 
@@ -100,6 +101,7 @@ That folder contains:
 - If the original script has a shebang, that interpreter is used for the snapshot.
 - If the script does not have a shebang, the launcher falls back to `bash`.
 - The snapshot preserves file mode and timestamps from the original script.
+- If `HOME` is unavailable, `hskue` falls back to `./hs_submitted_history`.
 
 ## Repository Contents
 
