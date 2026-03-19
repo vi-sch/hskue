@@ -19,6 +19,7 @@ Notes:
   - Arguments before `--` are passed to `hs submit`.
   - The job script is copied into the per-user history directory before submission.
   - The history directory keeps the newest 100 snapshots by default.
+  - A warning is printed if no local HyperShell cluster/server/client process is detected.
   - The queued command runs from the submit-time working directory.
 EOF
 }
@@ -87,6 +88,36 @@ prune_history_root() {
   done
 }
 
+escape_ere() {
+  printf '%s\n' "$1" | sed 's/[][(){}.^$*+?|\\/]/\\&/g'
+}
+
+hs_cluster_running() {
+  local hs_bin_name=$1
+  local escaped_hs_bin_name
+  local pattern
+
+  escaped_hs_bin_name=$(escape_ere "$hs_bin_name")
+  pattern="(^|[[:space:]/])${escaped_hs_bin_name}[[:space:]]+(cluster|server|client)([[:space:]]|$)"
+
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -f "$pattern" >/dev/null 2>&1
+    return
+  fi
+
+  ps -eo args= | grep -Eq "$pattern"
+}
+
+warn_if_no_hs_cluster() {
+  local hs_bin_name=$1
+
+  if hs_cluster_running "$hs_bin_name"; then
+    return
+  fi
+
+  printf '%s\n' "Warning: no local HyperShell cluster/server/client process detected for '$hs_bin_name'; submitted jobs may remain queued until workers are running." >&2
+}
+
 history_root_override=
 hs_bin_override=
 history_limit=100
@@ -129,6 +160,7 @@ job_args=("$@")
 
 HS_BIN=${hs_bin_override:-${HS_BIN:-hs}}
 command -v "$HS_BIN" >/dev/null 2>&1 || die "Could not find hypershell binary '$HS_BIN'."
+HS_BIN_NAME=$(basename "$HS_BIN")
 
 job_script_abs=$(resolve_path "$job_script_input")
 [[ -f "$job_script_abs" ]] || die "Job script does not exist: $job_script_input"
@@ -179,5 +211,6 @@ prune_history_root "$history_root" "$history_limit"
 
 printf 'Snapshot saved: %s\n' "$snapshot_script" >&2
 printf 'Launcher saved: %s\n' "$launcher_script" >&2
+warn_if_no_hs_cluster "$HS_BIN_NAME"
 
 exec "$HS_BIN" submit "${hs_submit_args[@]}" -- "$launcher_script" "${job_args[@]}"

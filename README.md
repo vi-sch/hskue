@@ -102,6 +102,7 @@ That folder contains:
 - If the script does not have a shebang, the launcher falls back to `bash`.
 - The snapshot preserves file mode and timestamps from the original script.
 - If `HOME` is unavailable, `hskue` falls back to `./hs_submitted_history`.
+- `hskue` prints a warning if it cannot detect a local `hs cluster`, `hs server`, or `hs client` process before submission.
 
 ## Repository Contents
 
