@@ -15,8 +15,10 @@ uv tool install .
 While iterating on the script locally, use editable mode instead:
 
 ```bash
-uv tool install --editable .
+uv tool install --editable --reinstall .
 ```
+
+Because `hskue` is installed as a shell script, changes to [hskue](/home/studschaeffer/src/hs_queue/hskue) are not picked up until you reinstall the tool.
 
 That installs the `hskue` command onto your `PATH`, so you can run:
 
@@ -29,10 +31,11 @@ hskue -- ./train.sh
 When you submit a job with `hskue`, it:
 
 1. Resolves the job script to an absolute path.
-2. Copies that script into a history directory with a timestamped snapshot folder.
-3. Writes a small launcher script that runs from the original submit-time working directory.
-4. Stores basic submission metadata.
-5. Calls `hs submit` with your original submit arguments and job arguments.
+2. Copies the script's containing directory into a history directory with a timestamped snapshot folder.
+3. Builds a lightweight runtime mirror rooted at the original submit-time working directory, overlaying the copied script directory onto symlinks to the live project tree.
+4. Writes a small launcher script that runs the mirrored entry script from the original submit-time working directory.
+5. Stores basic submission metadata.
+6. Calls `hs submit` with your original submit arguments and job arguments.
 
 ## Requirements
 
@@ -90,17 +93,20 @@ Each submission creates a folder like:
 
 That folder contains:
 
-- the copied job script
-- `launch.sh`, which runs the snapshot from the original working directory
+- `payload/`, containing the copied job script and its sibling files
+- `runtime/`, a lightweight mirrored tree used to preserve project-relative paths
+- `launch.sh`, which runs the mirrored snapshot from the original working directory
 - `metadata.txt`, which records submission details
 - old snapshot folders are pruned automatically so only the newest 100 remain
 
 ## Notes
 
 - The queued job runs from the working directory where `hskue` was invoked.
+- Copying the script directory helps scripts that source sibling files via `dirname "$0"` or `${BASH_SOURCE[0]}` keep working from the snapshot.
+- When the submitted script lives under the original submit directory, `hskue` mirrors that directory layout under `runtime/` so project-relative paths like `../configs` or `../logs` still resolve.
 - If the original script has a shebang, that interpreter is used for the snapshot.
 - If the script does not have a shebang, the launcher falls back to `bash`.
-- The snapshot preserves file mode and timestamps from the original script.
+- The snapshot preserves mode, timestamps, and symlinks for files copied from the script directory.
 - If `HOME` is unavailable, `hskue` falls back to `./hs_submitted_history`.
 - `hskue` prints a warning if it cannot detect a local `hs cluster`, `hs server`, or `hs client` process before submission.
 

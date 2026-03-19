@@ -17,7 +17,7 @@ Notes:
       --history-dir DIR  Override the snapshot directory.
       --hs-bin PATH      Override the hypershell binary (default: hs).
   - Arguments before `--` are passed to `hs submit`.
-  - The job script is copied into the per-user history directory before submission.
+  - The job script directory is copied into the per-user history directory before submission.
   - The history directory keeps the newest 100 snapshots by default.
   - A warning is printed if no local HyperShell cluster/server/client process is detected.
   - The queued command runs from the submit-time working directory.
@@ -43,6 +43,59 @@ resolve_path() {
   fi
 
   die "Need either 'realpath' or 'readlink -f' to resolve paths."
+}
+
+symlink_children_except() {
+  local source_dir=$1
+  local dest_dir=$2
+  local exclude_name=${3:-}
+  local entry_name
+
+  mkdir -p "$dest_dir"
+
+  while IFS= read -r -d '' entry_name; do
+    [[ -n "$exclude_name" && "$entry_name" == "$exclude_name" ]] && continue
+    ln -s "$source_dir/$entry_name" "$dest_dir/$entry_name"
+  done < <(find "$source_dir" -mindepth 1 -maxdepth 1 -printf '%P\0')
+}
+
+build_runtime_overlay() {
+  local source_root=$1
+  local overlay_rel_dir=$2
+  local overlay_source_dir=$3
+  local runtime_root=$4
+  local current_source=$source_root
+  local current_dest=$runtime_root
+  local current_component=
+  local overlay_dest=
+  local remainder=
+
+  mkdir -p "$runtime_root"
+
+  if [[ "$overlay_rel_dir" == "." ]]; then
+    symlink_children_except "$source_root" "$runtime_root"
+    cp -a "$overlay_source_dir"/. "$runtime_root"
+    return
+  fi
+
+  remainder=$overlay_rel_dir
+  while [[ -n "$remainder" ]]; do
+    if [[ "$remainder" == */* ]]; then
+      current_component=${remainder%%/*}
+      remainder=${remainder#*/}
+    else
+      current_component=$remainder
+      remainder=
+    fi
+
+    symlink_children_except "$current_source" "$current_dest" "$current_component"
+    current_source="$current_source/$current_component"
+    current_dest="$current_dest/$current_component"
+    mkdir -p "$current_dest"
+  done
+
+  overlay_dest=$current_dest
+  cp -a "$overlay_source_dir"/. "$overlay_dest"
 }
 
 script_interpreter() {
@@ -154,7 +207,7 @@ done
   exit 1
 }
 
-job_script_input=${1:-/home/studschaeffer/src/Synchformer_Encoder/scripts/train_stage1.sh}
+job_script_input=$1
 shift
 job_args=("$@")
 
@@ -172,19 +225,38 @@ history_root=$(resolve_path "$history_root")
 
 timestamp=$(date +%Y%m%dT%H%M%S)
 base_name=$(basename "$job_script_abs")
+job_script_dir=$(dirname "$job_script_abs")
 stem=${base_name%.*}
 hash=$(sha256sum "$job_script_abs" | awk '{print substr($1, 1, 12)}')
 snapshot_dir="$history_root/${timestamp}_${stem}_${hash}"
-snapshot_script="$snapshot_dir/$base_name"
+payload_dir="$snapshot_dir/payload"
+snapshot_script="$payload_dir/$base_name"
+runtime_root="$snapshot_dir/runtime"
+runtime_script=
 launcher_script="$snapshot_dir/launch.sh"
 metadata_file="$snapshot_dir/metadata.txt"
 
 mkdir -p "$snapshot_dir"
-cp --preserve=mode,timestamps "$job_script_abs" "$snapshot_script"
 
-interpreter=$(script_interpreter "$snapshot_script")
+if [[ $snapshot_dir == "$job_script_dir" || $snapshot_dir == "$job_script_dir"/* ]]; then
+  die "History directory cannot be inside the job script directory: $job_script_dir"
+fi
+
+mkdir -p "$payload_dir"
+cp -a "$job_script_dir"/. "$payload_dir"
+
+if [[ $job_script_abs == "$submit_cwd"/* || $job_script_abs == "$submit_cwd" ]]; then
+  job_script_rel=${job_script_abs#"$submit_cwd"/}
+  job_script_rel_dir=$(dirname "$job_script_rel")
+  build_runtime_overlay "$submit_cwd" "$job_script_rel_dir" "$payload_dir" "$runtime_root"
+  runtime_script="$runtime_root/$job_script_rel"
+else
+  runtime_script="$snapshot_script"
+fi
+
+interpreter=$(script_interpreter "$runtime_script")
 quoted_cwd=$(printf '%q' "$submit_cwd")
-quoted_snapshot=$(printf '%q' "$snapshot_script")
+quoted_snapshot=$(printf '%q' "$runtime_script")
 
 cat > "$launcher_script" <<EOF
 #!/usr/bin/env bash
@@ -199,8 +271,12 @@ chmod +x "$launcher_script"
 cat > "$metadata_file" <<EOF
 submitted_at=$timestamp
 original_script=$job_script_abs
+original_script_dir=$job_script_dir
 submit_cwd=$submit_cwd
+payload_dir=$payload_dir
 snapshot_script=$snapshot_script
+runtime_root=$runtime_root
+runtime_script=$runtime_script
 launcher_script=$launcher_script
 sha256=$hash
 hs_submit_args=${hs_submit_args[*]}
