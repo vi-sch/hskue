@@ -1,0 +1,4 @@
+hs_submitted_history/
+build/
+dist/
+*.egg-info/

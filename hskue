@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  hskue [wrapper args...] [hs submit args...] -- path/to/job.sh [job args...]
+
+Examples:
+  hskue -- ./train.sh
+  hskue --history-dir ./hs_submitted_history -- ./train.sh
+  hskue -t model:vit -t gpu:a100 -- ./train.sh --epochs 50
+  HS_SUBMITTED_HISTORY_DIR=./hs_submitted_history hskue -- ./train.sh
+
+Notes:
+  - Wrapper args:
+      --history-dir DIR  Override the snapshot directory.
+      --hs-bin PATH      Override the hypershell binary (default: hs).
+  - Arguments before `--` are passed to `hs submit`.
+  - The job script is copied into the history directory before submission.
+  - The queued command runs from the submit-time working directory.
+EOF
+}
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+resolve_path() {
+  local input_path=$1
+
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$input_path"
+    return
+  fi
+
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "$input_path"
+    return
+  fi
+
+  die "Need either 'realpath' or 'readlink -f' to resolve paths."
+}
+
+script_interpreter() {
+  local snapshot=$1
+  local first_line
+
+  if IFS= read -r first_line < "$snapshot" && [[ $first_line == '#!'* ]]; then
+    printf '%s\n' "${first_line#\#!}"
+  else
+    printf 'bash\n'
+  fi
+}
+
+history_root_override=
+hs_bin_override=
+hs_submit_args=()
+while (($#)); do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --history-dir)
+      (($# >= 2)) || die "--history-dir requires a value."
+      history_root_override=$2
+      shift 2
+      ;;
+    --hs-bin)
+      (($# >= 2)) || die "--hs-bin requires a value."
+      hs_bin_override=$2
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      hs_submit_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+(($# >= 1)) || {
+  usage >&2
+  exit 1
+}
+
+job_script_input=${1:-/home/studschaeffer/src/Synchformer_Encoder/scripts/train_stage1.sh}
+shift
+job_args=("$@")
+
+HS_BIN=${hs_bin_override:-${HS_BIN:-hs}}
+command -v "$HS_BIN" >/dev/null 2>&1 || die "Could not find hypershell binary '$HS_BIN'."
+
+job_script_abs=$(resolve_path "$job_script_input")
+[[ -f "$job_script_abs" ]] || die "Job script does not exist: $job_script_input"
+
+submit_cwd=$(pwd -P)
+history_root=${history_root_override:-${HS_SUBMITTED_HISTORY_DIR:-"$submit_cwd/hs_submitted_history"}}
+mkdir -p "$history_root"
+history_root=$(resolve_path "$history_root")
+
+timestamp=$(date +%Y%m%dT%H%M%S)
+base_name=$(basename "$job_script_abs")
+stem=${base_name%.*}
+hash=$(sha256sum "$job_script_abs" | awk '{print substr($1, 1, 12)}')
+snapshot_dir="$history_root/${timestamp}_${stem}_${hash}"
+snapshot_script="$snapshot_dir/$base_name"
+launcher_script="$snapshot_dir/launch.sh"
+metadata_file="$snapshot_dir/metadata.txt"
+
+mkdir -p "$snapshot_dir"
+cp --preserve=mode,timestamps "$job_script_abs" "$snapshot_script"
+
+interpreter=$(script_interpreter "$snapshot_script")
+quoted_cwd=$(printf '%q' "$submit_cwd")
+quoted_snapshot=$(printf '%q' "$snapshot_script")
+
+cat > "$launcher_script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd $quoted_cwd
+exec $interpreter $quoted_snapshot "\$@"
+EOF
+
+chmod +x "$launcher_script"
+
+cat > "$metadata_file" <<EOF
+submitted_at=$timestamp
+original_script=$job_script_abs
+submit_cwd=$submit_cwd
+snapshot_script=$snapshot_script
+launcher_script=$launcher_script
+sha256=$hash
+hs_submit_args=${hs_submit_args[*]}
+job_args=${job_args[*]}
+EOF
+
+printf 'Snapshot saved: %s\n' "$snapshot_script" >&2
+printf 'Launcher saved: %s\n' "$launcher_script" >&2
+
+exec "$HS_BIN" submit "${hs_submit_args[@]}" -- "$launcher_script" "${job_args[@]}"

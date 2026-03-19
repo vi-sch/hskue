@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hskue"
+version = "0.1.0"
+description = "Snapshot HyperShell job scripts before queueing them"
+readme = "README.md"
+requires-python = ">=3.8"
+
+[tool.setuptools]
+script-files = ["hskue"]
